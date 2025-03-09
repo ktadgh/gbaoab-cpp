@@ -53,16 +53,18 @@ void rattleHard(cublasHandle_t handle, cusolverDnHandle_t cusolver_handle, float
     float beta = 0.0f; 
     float alpha2 = 2.0f;
     float diffval = -1.0f;
-    
+    float h_t = 2.0f/(h*h);
     // Device pointers
-    float *x_ptr, *v_ptr, *x_ptr_new, *dL_ptr, *diff_ptr, *v12_ptr;
-    float **d_I, **diff_ptrs, **dL_ptrs;
+    float *x_ptr, *v_ptr, *x_ptr_new, *v_ptr_new, *dL_ptr, *diff_ptr, *v12_ptr, *T_ptr;
+    float **d_I, **diff_ptrs, **dL_ptrs, **v_ptrs_new;
     float *d_I_flat, *R_ptr_flat;
     
     // Allocate memory for flat arrays
     checkCudaError(cudaMalloc(&x_ptr, batchSize * 3 * sizeof(float)));
     checkCudaError(cudaMalloc(&v_ptr, batchSize * 3 * sizeof(float)));
     checkCudaError(cudaMalloc(&x_ptr_new, batchSize * 3 * sizeof(float)));
+    checkCudaError(cudaMalloc(&v_ptr_new, batchSize * 3 * sizeof(float)));
+
     checkCudaError(cudaMalloc(&d_I_flat, batchSize * sizeof(float)));
     checkCudaError(cudaMalloc(&R_ptr_flat, batchSize * sizeof(float)));
     
@@ -70,7 +72,8 @@ void rattleHard(cublasHandle_t handle, cusolverDnHandle_t cusolver_handle, float
     checkCudaError(cudaMalloc(&diff_ptrs, batchSize * sizeof(float*)));
     checkCudaError(cudaMalloc(&dL_ptrs, batchSize * sizeof(float*)));
     checkCudaError(cudaMalloc(&d_I, batchSize * sizeof(float*)));
-    
+    checkCudaError(cudaMalloc(&v_ptrs_new, batchSize * sizeof(float*)));
+
     // Allocate memory for other variables
     checkCudaError(cudaMalloc(&dL_ptr, batchSize * sizeof(float)));
     checkCudaError(cudaMalloc(&diff_ptr, batchSize * 3 * sizeof(float))); // Changed size to 3*batchSize
@@ -181,6 +184,7 @@ void rattleHard(cublasHandle_t handle, cusolverDnHandle_t cusolver_handle, float
             diff_ptrs, 3,
             batchSize), "cublasSgemmBatched 3");
         
+
         checkCudaError(cudaDeviceSynchronize());
         
         // Convert batched to flattened for diff
@@ -193,15 +197,36 @@ void rattleHard(cublasHandle_t handle, cusolverDnHandle_t cusolver_handle, float
         std::cout << "Finished iteration " << i + 1 << "." << std::endl;
     }
     
-    // Update x with v12_ptr (properly initialized)
-    for (int i = 0; i < batchSize * 3; i++) {
-        float h_v12 = 0.0f; // Initialize with a safe value
-        checkCudaError(cudaMemcpy(v12_ptr + i, &h_v12, sizeof(float), cudaMemcpyHostToDevice));
-    }
+
+    cudaError_t error = cudaMemcpy(v_ptr_new, x_ptr_new, 3*batchSize * sizeof(float), cudaMemcpyDeviceToDevice);
+    checkCublas(cublasSaxpy(handle, batchSize * 3, &diffval, x_ptr, 1, v_ptr_new, 1), "cublasSaxpy 3"); // still need to divide by h
     
-    // Copy result back
-    checkCudaError(cudaMemcpy(x, x_ptr_new, batchSize * 3 * sizeof(float), cudaMemcpyDeviceToHost));
+    convertFlattenedToBatched<<<numBlocks, blockSize>>>(x_ptr_new, x_ptrs_new, batchSize, 1); // is it ok to overwrite the previously used pointer
+
+    checkCublas(cublasSgemmBatched(handle,
+        CUBLAS_OP_N, CUBLAS_OP_N,
+        1, 1, 3,
+        &alpha,
+        x_ptrs_new, 1,
+        x_ptrs_new, 3,
+        &beta,
+        R_ptr, 3,
+        batchSize), "cublasSgemmBatched 4"); //  p in my original implementation, again is it ok to overwrite the previously used pointer R_ptr
+
     
+    convertFlattenedToBatched<<<numBlocks, blockSize>>>(v_ptr_new, v_ptrs_new, batchSize, 1);
+
+    checkCublas(cublasSgemmBatched(handle,
+        CUBLAS_OP_N, CUBLAS_OP_N,
+        1, 3, 1,
+        &h_t,
+        x_ptrs_new, 1,
+        v_ptrs_new, 3,
+        &beta,
+        R_ptr, 3,
+        batchSize), "cublasSgemmBatched 5"); //  p in my original implementation, again is it ok to overwrite the previously used pointer R_ptr
+    
+    // note to self: I'm sure m n and k are wrong for most gemms, not sure why this runs without errors
     // Free all allocated memory
     checkCudaError(cudaFree(x_ptr));
     checkCudaError(cudaFree(v_ptr));
