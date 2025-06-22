@@ -230,12 +230,12 @@ void rattleHard(cublasHandle_t handle, cusolverDnHandle_t cusolver_handle, float
     int numBlocks = (batchSize + blockSize - 1) / blockSize;
 
     // 1) Add h*v to x_ptr_new
-    checkCudaError(cudaMemcpy(ctx.x_ptr_new, x_ptr, batchSize * 3 * sizeof(float), cudaMemcpyDeviceToDevice));
-    checkCublas(cublasSaxpy(handle, batchSize * 3, &h, v_ptr, 1, ctx.x_ptr_new, 1), "cublasSaxpy 1");
+    (cudaMemcpy(ctx.x_ptr_new, x_ptr, batchSize * 3 * sizeof(float), cudaMemcpyDeviceToDevice));
+    (cublasSaxpy(handle, batchSize * 3, &h, v_ptr, 1, ctx.x_ptr_new, 1), "cublasSaxpy 1");
 
     for (int i = 0; i < 3; i++) {
         // 2) Batched multiplication: R = 4 * x * x_new^T
-        checkCublas(cublasSgemmBatched(handle,
+        (cublasSgemmBatched(handle,
             CUBLAS_OP_N, CUBLAS_OP_T,
             1, 1, 3,
             &alpha,
@@ -244,30 +244,30 @@ void rattleHard(cublasHandle_t handle, cusolverDnHandle_t cusolver_handle, float
             &beta,
             ctx.R_ptr, 1,
             batchSize), "cublasSgemmBatched 1");
-        checkCudaError(cudaDeviceSynchronize());
+        (cudaDeviceSynchronize());
 
         // 3) Flatten R, compute inverse elementwise, convert back to batched
         convertBatchedToFlattened<<<numBlocks, blockSize>>>(ctx.R_ptr, ctx.R_ptr_flat, batchSize, 1);
-        checkCudaError(cudaDeviceSynchronize());
+        (cudaDeviceSynchronize());
 
         elementwiseInverse<<<numBlocks, blockSize>>>(ctx.R_ptr_flat, ctx.d_I_flat, batchSize);
-        checkCudaError(cudaDeviceSynchronize());
+        (cudaDeviceSynchronize());
 
         convertFlattenedToBatched<<<numBlocks, blockSize>>>(ctx.d_I_flat, ctx.d_I, batchSize, 1);
-        checkCudaError(cudaDeviceSynchronize());
+        (cudaDeviceSynchronize());
 
         // 4) Launch kernel G and multiply elementwise with d_I_flat -> dL_ptr, then convert to batched
         G<<<numBlocks, blockSize>>>(ctx.x_ptrs_new, ctx.R_ptr_flat /*reuse*/, batchSize);
-        checkCudaError(cudaDeviceSynchronize());
+        (cudaDeviceSynchronize());
 
         elementwiseMul<<<numBlocks, blockSize>>>(ctx.d_I_flat, ctx.R_ptr_flat, ctx.dL_ptr, batchSize);
-        checkCudaError(cudaDeviceSynchronize());
+        (cudaDeviceSynchronize());
 
         convertFlattenedToBatched<<<numBlocks, blockSize>>>(ctx.dL_ptr, ctx.dL_ptrs, batchSize, 1);
-        checkCudaError(cudaDeviceSynchronize());
+        (cudaDeviceSynchronize());
 
         // 5) Third matrix multiplication: diff = 2 * x * dL_ptr
-        checkCublas(cublasSgemmBatched(handle,
+        (cublasSgemmBatched(handle,
             CUBLAS_OP_N, CUBLAS_OP_N,
             3, 1, 1,
             &alpha2,
@@ -276,16 +276,16 @@ void rattleHard(cublasHandle_t handle, cusolverDnHandle_t cusolver_handle, float
             &beta,
             ctx.diff_ptrs, 3,
             batchSize), "cublasSgemmBatched 3");
-        checkCudaError(cudaDeviceSynchronize());
+        (cudaDeviceSynchronize());
 
         // 6) Flatten diff, then apply diffval offset to x_ptr_new
         convertBatchedToFlattened<<<numBlocks, blockSize>>>(ctx.diff_ptrs, ctx.diff_ptr, batchSize, 3);
-        checkCudaError(cudaDeviceSynchronize());
+        (cudaDeviceSynchronize());
 
-        checkCublas(cublasSaxpy(handle, batchSize * 3, &diffval, ctx.diff_ptr, 1, ctx.x_ptr_new, 1), "cublasSaxpy 2");
+        (cublasSaxpy(handle, batchSize * 3, &diffval, ctx.diff_ptr, 1, ctx.x_ptr_new, 1), "cublasSaxpy 2");
 
         convertFlattenedToBatched<<<numBlocks, blockSize>>>(ctx.x_ptr_new, ctx.x_ptrs_new, batchSize, 1);
-        checkCudaError(cudaDeviceSynchronize());
+        (cudaDeviceSynchronize());
     }
 
     // 7) Copy x_ptr_new to v_ptr_new, then subtract original x_ptr (v_ptr_new = x_ptr_new - x_ptr)

@@ -21,7 +21,7 @@ h = 0.000001
 t1 = time.time()
 rattle_hard_cuda.rattle_hard(x, v, h, iterations)
 t2 = time.time()
-print(f'CUDA: time per iteration = {(t2-t1)*iterations/1000} ms')
+print(f'CUDA: time per iteration = {(t2-t1)*1000/iterations} ms')
 # print(x)
 torch.manual_seed(0)
 torch.cuda.manual_seed_all(0)  # For all GPUs
@@ -34,7 +34,7 @@ for _ in range(iterations):
     x, v = manifold.rattle_step(x,v,h)
 t2 = time.time()
 # print(x)
-print(f'PyTorch: time per iteration = {(t2-t1)*iterations/1000} ms')
+print(f'PyTorch: time per iteration = {(t2-t1)*1000/iterations} ms')
 
 
 
