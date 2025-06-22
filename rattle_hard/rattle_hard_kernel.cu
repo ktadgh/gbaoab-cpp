@@ -2,6 +2,7 @@
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 #include <cusolverDn.h>
+#include <torch/extension.h>
 
 // CUDA kernels for converting between batched and flattened matrices
 __global__ void convertFlattenedToBatched(float *d_x_flattened, float **d_x_ptrs, int batchSize, int matrixSize) {
@@ -46,6 +47,22 @@ __global__ void elementwiseDiv(float* d_x, float* d_y, float* d_result, int size
     }
 }
 
+__global__ void elementwiseMul(float* d_x, float* d_y, float* d_result, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+            d_result[idx] = d_x[idx] * d_y[idx];
+        }
+}
+
+__global__ void G(float **x_ptrs, float *output, int batchSize) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= batchSize) return;
+
+    float *x = x_ptrs[idx];  // pointer to batch element (3 floats)
+    float result = x[0]*x[0] + x[1]*x[1] + x[2]*x[2] - 1.0f;
+    output[idx] = result;
+}
+
 void checkCublas(cublasStatus_t status, const std::string& functionName) {
     if (status != CUBLAS_STATUS_SUCCESS) {
         std::cerr << "cuBLAS Error in " << functionName << ": " << status << std::endl;
@@ -60,6 +77,34 @@ void checkCudaError(cudaError_t err) {
     }
 }
 
+
+// Function to copy and print a single matrix/vector from device memory:
+void printDeviceMatrix(const float* d_mat, int rows, int cols) {
+    std::vector<float> h_mat(rows * cols);
+    // Synchronous copy from device to host
+    cudaMemcpy(h_mat.data(), d_mat, rows * cols * sizeof(float), cudaMemcpyDeviceToHost);
+
+    for (int r = 0; r < rows; ++r) {
+        for (int c = 0; c < cols; ++c) {
+            std::cout << h_mat[r * cols + c] << " ";
+        }
+        std::cout << std::endl;
+    }
+}
+
+
+void printWholeBatchR(float** d_R_ptr, int batchSize, int rows, int cols) {
+    for (int i = 0; i < batchSize; ++i) {
+        // Copy device pointer for ith matrix from device to host
+        float* h_single_R_ptr;
+        cudaMemcpy(&h_single_R_ptr, d_R_ptr + i, sizeof(float*), cudaMemcpyDeviceToHost);
+
+        std::cout << "R_ptr[" << i << "]:" << std::endl;
+        printDeviceMatrix(h_single_R_ptr, rows, cols);
+        std::cout << std::endl;
+    }
+}
+
 void rattleHard(cublasHandle_t handle, cusolverDnHandle_t cusolver_handle, float *x, float *v, int batchSize, float h) {
     float alpha = 4.0f;
     float beta = 0.0f; 
@@ -68,14 +113,14 @@ void rattleHard(cublasHandle_t handle, cusolverDnHandle_t cusolver_handle, float
     float h_t = 4.0f/(h*h);
     
     // Device pointers
-    float *x_ptr, *v_ptr, *x_ptr_new, *v_ptr_new, *dL_ptr, *diff_ptr, *v12_ptr;
+    float *x_ptr_new, *v_ptr_new, *dL_ptr, *diff_ptr, *v12_ptr;
     float **d_I, **diff_ptrs, **dL_ptrs, **v_ptrs_new;
     float *d_I_flat, *R_ptr_flat, *L_ptrs_flat;
     float **L_ptrs;
     
     // Allocate memory for flat arrays
-    checkCudaError(cudaMalloc(&x_ptr, batchSize * 3 * sizeof(float)));
-    checkCudaError(cudaMalloc(&v_ptr, batchSize * 3 * sizeof(float)));
+    float *x_ptr = x;  // Use input device pointer
+    float *v_ptr = v;  // Use input device pointer
     checkCudaError(cudaMalloc(&x_ptr_new, batchSize * 3 * sizeof(float)));
     checkCudaError(cudaMalloc(&v_ptr_new, batchSize * 3 * sizeof(float)));
 
@@ -150,21 +195,21 @@ void rattleHard(cublasHandle_t handle, cusolverDnHandle_t cusolver_handle, float
     checkCudaError(cudaMemcpy(d_I, d_I_host, batchSize * sizeof(float*), cudaMemcpyHostToDevice));
     checkCudaError(cudaMemcpy(L_ptrs, L_ptrs_host, batchSize * sizeof(float*), cudaMemcpyHostToDevice)); // FIX: Added for L_ptrs
     checkCudaError(cudaMemcpy(v_ptrs_new, v_ptrs_new_host, batchSize * sizeof(float*), cudaMemcpyHostToDevice)); // FIX: Added for v_ptrs_new
-    
-    std::cout << "All memory allocated and initialized successfully." << std::endl;
-    
+        
     // Set up kernel execution parameters
     int blockSize = 256;
     int numBlocks = (batchSize + blockSize - 1) / blockSize;
-    
+    float* diff_host = new float[batchSize * 3];
+    float *output_flat;
+    checkCudaError(cudaMalloc(&output_flat, batchSize * sizeof(float)));
     // Main calculation loop
-    for (int i = 0; i < 1; i++) {
+    for (int i = 0; i < 3; i++) {
         // First matrix multiplication
         // FIX: Correct matrix dimensions - assuming each x is a 1x3 row vector
         checkCublas(cublasSgemmBatched(handle,
             CUBLAS_OP_N, CUBLAS_OP_T, // FIX: Transpose second matrix
             1, 1, 3,
-            &alpha,
+            &alpha, // multiplying result by 4 for the sphere
             (const float**)x_ptrs, 1,
             (const float**)x_ptrs_new, 1, // FIX: Leading dimension should be 1 for row vector
             &beta,
@@ -172,7 +217,6 @@ void rattleHard(cublasHandle_t handle, cusolverDnHandle_t cusolver_handle, float
             batchSize), "cublasSgemmBatched 1");
         
         checkCudaError(cudaDeviceSynchronize());
-        
         // Convert batched to flattened
         convertBatchedToFlattened<<<numBlocks, blockSize>>>(R_ptr, R_ptr_flat, batchSize, 1);
         checkCudaError(cudaDeviceSynchronize());
@@ -180,22 +224,16 @@ void rattleHard(cublasHandle_t handle, cusolverDnHandle_t cusolver_handle, float
         // Compute elementwise inverse
         elementwiseInverse<<<numBlocks, blockSize>>>(R_ptr_flat, d_I_flat, batchSize);
         checkCudaError(cudaDeviceSynchronize());
-        
+        // printDeviceMatrix(d_I_flat, 1, 1);  // if your matrices are 1x1 as in your example
+
         // Convert flattened to batched
         convertFlattenedToBatched<<<numBlocks, blockSize>>>(d_I_flat, d_I, batchSize, 1);
         checkCudaError(cudaDeviceSynchronize());
         
-        // Second matrix multiplication
-        // FIX: Correct dimensions - scalar * vector = vector
-        checkCublas(cublasSgemmBatched(handle,
-            CUBLAS_OP_N, CUBLAS_OP_N,
-            3, 1, 1,
-            &alpha2,
-            (const float**)x_ptrs_new, 3,
-            (const float**)d_I, 1,
-            &beta,
-            dL_ptrs, 3,
-            batchSize), "cublasSgemmBatched 2");
+        G<<<numBlocks, blockSize>>>(x_ptrs_new, output_flat, batchSize);
+        elementwiseMul<<<numBlocks, blockSize>>>(d_I_flat, output_flat, dL_ptr, batchSize);
+        convertFlattenedToBatched<<<numBlocks, blockSize>>>(dL_ptr, dL_ptrs, batchSize, 1);
+
         
         checkCudaError(cudaDeviceSynchronize());
         
@@ -208,26 +246,43 @@ void rattleHard(cublasHandle_t handle, cusolverDnHandle_t cusolver_handle, float
             (const float**)dL_ptrs, 1,
             &beta,
             diff_ptrs, 3,
-            batchSize), "cublasSgemmBatched 3");
-        
+            batchSize), "cublasSgemmBatched 3"); // diff = 2 x dL_ptrs
+
+
         checkCudaError(cudaDeviceSynchronize());
         
         // Convert batched to flattened for diff
         convertBatchedToFlattened<<<numBlocks, blockSize>>>(diff_ptrs, diff_ptr, batchSize, 3);
         checkCudaError(cudaDeviceSynchronize());
+
         
+        // checkCudaError(cudaMemcpy(diff_host, diff_ptr, batchSize * 3 * sizeof(float), cudaMemcpyDeviceToHost));
+
+        // // Print diff_host contents
+        // std::cout << "diff_ptr after iteration " << i << ":\n";
+        // for (int b = 0; b < batchSize; b++) {
+        //     std::cout << "Batch " << b << ": ";
+        //     for (int j = 0; j < 3; j++) {
+        //         std::cout << diff_host[b * 3 + j] << " ";
+        //     }
+        //     std::cout << "\n";
+        // }
         // Apply diff to x_ptr_new
-        checkCublas(cublasSaxpy(handle, batchSize * 3, &diffval, diff_ptr, 1, x_ptr_new, 1), "cublasSaxpy 2");
-        
-        std::cout << "Finished iteration " << i + 1 << "." << std::endl;
+        checkCublas(cublasSaxpy(handle, batchSize * 3, &diffval, diff_ptr, 1, x_ptr_new, 1), "cublasSaxpy 2"); //xnew​=xnew​- diff_ptr
+        convertFlattenedToBatched<<<numBlocks, blockSize>>>(x_ptr_new, x_ptrs_new, batchSize, 1);
+
     }
     
     // Copy x_new to v_new
     checkCudaError(cudaMemcpy(v_ptr_new, x_ptr_new, 3 * batchSize * sizeof(float), cudaMemcpyDeviceToDevice));
     
     // Subtract original x from v_new
-    checkCublas(cublasSaxpy(handle, batchSize * 3, &diffval, x_ptr, 1, v_ptr_new, 1), "cublasSaxpy 3");
+    checkCublas(cublasSaxpy(handle, batchSize * 3, &diffval, x_ptr, 1, v_ptr_new, 1), "cublasSaxpy 3"); // vptr_new = xptr_new - x_ptr . still needs to be divided by h
     
+    // float* v_host = new float[batchSize * 3];
+    // cudaMemcpy(v_host, v_ptr_new, batchSize * 3 * sizeof(float), cudaMemcpyDeviceToHost);
+
+
     // Convert flattened to batched for updated x
     convertFlattenedToBatched<<<numBlocks, blockSize>>>(x_ptr_new, x_ptrs_new, batchSize, 3);
     checkCudaError(cudaDeviceSynchronize());
@@ -242,7 +297,7 @@ void rattleHard(cublasHandle_t handle, cusolverDnHandle_t cusolver_handle, float
         (const float**)x_ptrs_new, 1,
         &beta,
         R_ptr, 1,
-        batchSize), "cublasSgemmBatched 4");
+        batchSize), "cublasSgemmBatched 4"); // updating R_ptr, this is equivalent to P in the original
     
     checkCudaError(cudaDeviceSynchronize());
     
@@ -259,7 +314,8 @@ void rattleHard(cublasHandle_t handle, cusolverDnHandle_t cusolver_handle, float
         (const float**)v_ptrs_new, 1,
         &beta,
         dL_ptrs, 3,
-        batchSize), "cublasSgemmBatched 5");
+        batchSize), "cublasSgemmBatched 5"); // dl_ptrs = 4(x @ 2v/h) - equal to t in the original implementation
+        // h_t is 4/h^2 because v still needed to be divided by h, 
     
     checkCudaError(cudaDeviceSynchronize());
     
@@ -269,15 +325,15 @@ void rattleHard(cublasHandle_t handle, cusolverDnHandle_t cusolver_handle, float
     checkCudaError(cudaDeviceSynchronize());
     
     // Element-wise division
-    elementwiseDiv<<<numBlocks, blockSize>>>(R_ptr_flat, dL_ptr, L_ptrs_flat, batchSize * 3);
+    elementwiseDiv<<<numBlocks, blockSize>>>(R_ptr_flat, dL_ptr, L_ptrs_flat, batchSize * 3); // L = L_ptrs/R = T/P
     checkCudaError(cudaDeviceSynchronize());
     
     // Convert flattened to batched
     convertFlattenedToBatched<<<numBlocks, blockSize>>>(L_ptrs_flat, L_ptrs, batchSize, 3);
     checkCudaError(cudaDeviceSynchronize());
     
-    float h2 = h / 2.0f;
-    float h3 = 1.0f / h;
+    float h2 = h;
+    float h3 = 1.0f/h;
     
     // Final matrix multiplication
     checkCublas(cublasSgemmBatched(handle,
@@ -285,16 +341,18 @@ void rattleHard(cublasHandle_t handle, cusolverDnHandle_t cusolver_handle, float
         3, 1, 1,
         &h2,
         (const float**)x_ptrs_new, 3,
-        (const float**)dL_ptrs, 1,
+        (const float**)L_ptrs, 1,
         &h3,
         v_ptrs_new, 3,
-        batchSize), "cublasSgemmBatched 6");
+        batchSize), "cublasSgemmBatched 6"); // v_ptrs_new = (h) * x_ptrs_new * dL_ptrs + 1/h v_ptrs_new = v + h/2 J @ L 
     
     checkCudaError(cudaDeviceSynchronize());
-    
+    cudaMemcpy(x_ptr, x_ptr_new, batchSize * 3 * sizeof(float), cudaMemcpyDeviceToDevice);
+    cudaMemcpy(v_ptr, v_ptr_new, batchSize * 3 * sizeof(float), cudaMemcpyDeviceToDevice);
+
     // Free all allocated memory
-    checkCudaError(cudaFree(x_ptr));
-    checkCudaError(cudaFree(v_ptr));
+    // checkCudaError(cudaFree(x_ptr));
+    // checkCudaError(cudaFree(v_ptr));
     checkCudaError(cudaFree(x_ptr_new));
     checkCudaError(cudaFree(v_ptr_new));
     checkCudaError(cudaFree(d_I_flat));
@@ -332,6 +390,29 @@ void rattleHard(cublasHandle_t handle, cusolverDnHandle_t cusolver_handle, float
     delete[] d_I_host;
     delete[] L_ptrs_host;     // FIX: Delete allocated memory
     delete[] v_ptrs_new_host; // FIX: Delete allocated memory
+}
+
+
+void rattle_hard_launcher(torch::Tensor x, torch::Tensor v, float h) {
+    TORCH_CHECK(x.is_cuda(), "x must be a CUDA tensor");
+    TORCH_CHECK(v.is_cuda(), "v must be a CUDA tensor");
+    TORCH_CHECK(x.dtype() == torch::kFloat32, "x must be float32");
+    TORCH_CHECK(v.dtype() == torch::kFloat32, "v must be float32");
+
+    float* d_x = x.data_ptr<float>();
+    float* d_v = v.data_ptr<float>();
+    int batchSize = x.size(0);
+
+    cublasHandle_t cublasHandle;
+    cublasCreate(&cublasHandle);
+    cusolverDnHandle_t cusolverHandle;
+    cusolverDnCreate(&cusolverHandle);
+
+    // Pass device pointers directly to rattleHard
+    rattleHard(cublasHandle, cusolverHandle, d_x, d_v, batchSize, h);
+
+    cublasDestroy(cublasHandle);
+    cusolverDnDestroy(cusolverHandle);
 }
 
 int main() {
@@ -372,16 +453,7 @@ int main() {
     // Copy the result back to host
     cudaMemcpy(h_x, d_x, batchSize * 3 * sizeof(float), cudaMemcpyDeviceToHost);
     
-    // Output the result
-    std::cout << "Updated x:" << std::endl;
-    for (int i = 0; i < batchSize; ++i) {
-        std::cout << "x[" << i << "]: ";
-        for (int j = 0; j < 3; ++j) {
-            std::cout << h_x[i * 3 + j] << " ";
-        }
-        std::cout << std::endl;
-    }
-    
+
     // Cleanup
     cudaFree(d_x);
     cudaFree(d_v);
