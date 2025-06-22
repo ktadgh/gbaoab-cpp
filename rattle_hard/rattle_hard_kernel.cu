@@ -230,6 +230,7 @@ void rattleHard(cublasHandle_t handle, cusolverDnHandle_t cusolver_handle, float
     int numBlocks = (batchSize + blockSize - 1) / blockSize;
 
     // 1) Add h*v to x_ptr_new
+    checkCudaError(cudaMemcpy(ctx.x_ptr_new, x_ptr, batchSize * 3 * sizeof(float), cudaMemcpyDeviceToDevice));
     checkCublas(cublasSaxpy(handle, batchSize * 3, &h, v_ptr, 1, ctx.x_ptr_new, 1), "cublasSaxpy 1");
 
     for (int i = 0; i < 3; i++) {
