@@ -105,360 +105,287 @@ void printWholeBatchR(float** d_R_ptr, int batchSize, int rows, int cols) {
     }
 }
 
-void rattleHard(cublasHandle_t handle, cusolverDnHandle_t cusolver_handle, float *x, float *v, int batchSize, float h) {
-    float alpha = 4.0f;
-    float beta = 0.0f; 
-    float alpha2 = 2.0f;
-    float diffval = -1.0f;
-    float h_t = 4.0f/(h*h);
-    
-    // Device pointers
+
+struct RattleHardContext {
     float *x_ptr_new, *v_ptr_new, *dL_ptr, *diff_ptr, *v12_ptr;
     float **d_I, **diff_ptrs, **dL_ptrs, **v_ptrs_new;
     float *d_I_flat, *R_ptr_flat, *L_ptrs_flat;
     float **L_ptrs;
-    
-    // Allocate memory for flat arrays
-    float *x_ptr = x;  // Use input device pointer
-    float *v_ptr = v;  // Use input device pointer
-    checkCudaError(cudaMalloc(&x_ptr_new, batchSize * 3 * sizeof(float)));
-    checkCudaError(cudaMalloc(&v_ptr_new, batchSize * 3 * sizeof(float)));
 
-    checkCudaError(cudaMalloc(&d_I_flat, batchSize * sizeof(float)));
-    checkCudaError(cudaMalloc(&R_ptr_flat, batchSize * sizeof(float)));
-    
-    // Allocate memory for L_ptrs_flat and L_ptrs - FIX: These were missing
-    checkCudaError(cudaMalloc(&L_ptrs_flat, batchSize * 3 * sizeof(float)));
-    checkCudaError(cudaMalloc(&L_ptrs, batchSize * sizeof(float*)));
-    
-    // Allocate memory for pointer arrays
-    checkCudaError(cudaMalloc(&diff_ptrs, batchSize * sizeof(float*)));
-    checkCudaError(cudaMalloc(&dL_ptrs, batchSize * sizeof(float*)));
-    checkCudaError(cudaMalloc(&d_I, batchSize * sizeof(float*)));
-    checkCudaError(cudaMalloc(&v_ptrs_new, batchSize * sizeof(float*)));
-
-    // Allocate memory for other variables
-    checkCudaError(cudaMalloc(&dL_ptr, batchSize * 3 * sizeof(float))); // FIX: Size should be 3*batchSize
-    checkCudaError(cudaMalloc(&diff_ptr, batchSize * 3 * sizeof(float)));
-    checkCudaError(cudaMalloc(&v12_ptr, batchSize * 3 * sizeof(float)));
-    
-    // Copy data to device
-    checkCudaError(cudaMemcpy(x_ptr, x, batchSize * 3 * sizeof(float), cudaMemcpyHostToDevice));
-    checkCudaError(cudaMemcpy(v_ptr, v, batchSize * 3 * sizeof(float), cudaMemcpyHostToDevice));
-    checkCudaError(cudaMemcpy(x_ptr_new, x, batchSize * 3 * sizeof(float), cudaMemcpyHostToDevice));
-    
-    // Add h*v to x_new
-    checkCublas(cublasSaxpy(handle, batchSize * 3, &h, v_ptr, 1, x_ptr_new, 1), "cublasSaxpy 1");
-    
-    // Allocate memory for the batched pointers
     float **x_ptrs, **x_ptrs_new, **R_ptr;
-    checkCudaError(cudaMalloc(&x_ptrs, batchSize * sizeof(float*)));
-    checkCudaError(cudaMalloc(&x_ptrs_new, batchSize * sizeof(float*)));
-    checkCudaError(cudaMalloc(&R_ptr, batchSize * sizeof(float*)));
-    
-    // Set up host pointers
-    float** x_ptrs_host = new float*[batchSize];
-    float** x_ptrs_new_host = new float*[batchSize];
-    float** R_ptr_host = new float*[batchSize];
-    float** diff_ptrs_host = new float*[batchSize];
-    float** dL_ptrs_host = new float*[batchSize];
-    float** d_I_host = new float*[batchSize];
-    float** L_ptrs_host = new float*[batchSize];  // FIX: Added for L_ptrs
-    float** v_ptrs_new_host = new float*[batchSize]; // FIX: Added for v_ptrs_new
-    
-    // Allocate memory for each matrix
+    float **x_ptrs_host, **x_ptrs_new_host, **R_ptr_host;
+    float **diff_ptrs_host, **dL_ptrs_host, **d_I_host;
+    float **L_ptrs_host, **v_ptrs_new_host;
+
+    int batchSize;
+};
+
+void allocateRattleHardContext(RattleHardContext &ctx, int batchSize) {
+    ctx.batchSize = batchSize;
+
+    // Allocate device memory similar to your current allocation code...
+    checkCudaError(cudaMalloc(&ctx.x_ptr_new, batchSize * 3 * sizeof(float)));
+    checkCudaError(cudaMalloc(&ctx.v_ptr_new, batchSize * 3 * sizeof(float)));
+    checkCudaError(cudaMalloc(&ctx.d_I_flat, batchSize * sizeof(float)));
+    checkCudaError(cudaMalloc(&ctx.R_ptr_flat, batchSize * sizeof(float)));
+    checkCudaError(cudaMalloc(&ctx.L_ptrs_flat, batchSize * 3 * sizeof(float)));
+    checkCudaError(cudaMalloc(&ctx.L_ptrs, batchSize * sizeof(float*)));
+    checkCudaError(cudaMalloc(&ctx.diff_ptrs, batchSize * sizeof(float*)));
+    checkCudaError(cudaMalloc(&ctx.dL_ptrs, batchSize * sizeof(float*)));
+    checkCudaError(cudaMalloc(&ctx.d_I, batchSize * sizeof(float*)));
+    checkCudaError(cudaMalloc(&ctx.v_ptrs_new, batchSize * sizeof(float*)));
+    checkCudaError(cudaMalloc(&ctx.dL_ptr, batchSize * 3 * sizeof(float)));
+    checkCudaError(cudaMalloc(&ctx.diff_ptr, batchSize * 3 * sizeof(float)));
+    checkCudaError(cudaMalloc(&ctx.v12_ptr, batchSize * 3 * sizeof(float)));
+    checkCudaError(cudaMalloc(&ctx.x_ptrs, batchSize * sizeof(float*)));
+    checkCudaError(cudaMalloc(&ctx.x_ptrs_new, batchSize * sizeof(float*)));
+    checkCudaError(cudaMalloc(&ctx.R_ptr, batchSize * sizeof(float*)));
+
+    // Allocate host arrays of pointers
+    ctx.x_ptrs_host = new float*[batchSize];
+    ctx.x_ptrs_new_host = new float*[batchSize];
+    ctx.R_ptr_host = new float*[batchSize];
+    ctx.diff_ptrs_host = new float*[batchSize];
+    ctx.dL_ptrs_host = new float*[batchSize];
+    ctx.d_I_host = new float*[batchSize];
+    ctx.L_ptrs_host = new float*[batchSize];
+    ctx.v_ptrs_new_host = new float*[batchSize];
+
+    // Allocate per-batch device memory pointers
     for (int i = 0; i < batchSize; i++) {
-        checkCudaError(cudaMalloc(&x_ptrs_host[i], 3 * sizeof(float)));
-        checkCudaError(cudaMalloc(&x_ptrs_new_host[i], 3 * sizeof(float)));
-        checkCudaError(cudaMalloc(&R_ptr_host[i], sizeof(float)));
-        checkCudaError(cudaMalloc(&diff_ptrs_host[i], 3 * sizeof(float)));
-        checkCudaError(cudaMalloc(&dL_ptrs_host[i], 3 * sizeof(float)));
-        checkCudaError(cudaMalloc(&d_I_host[i], sizeof(float)));
-        checkCudaError(cudaMalloc(&L_ptrs_host[i], 3 * sizeof(float))); // FIX: Added for L_ptrs
-        checkCudaError(cudaMalloc(&v_ptrs_new_host[i], 3 * sizeof(float))); // FIX: Added for v_ptrs_new
-        
-        // Initialize d_I with value 1.0f
+        checkCudaError(cudaMalloc(&ctx.x_ptrs_host[i], 3 * sizeof(float)));
+        checkCudaError(cudaMalloc(&ctx.x_ptrs_new_host[i], 3 * sizeof(float)));
+        checkCudaError(cudaMalloc(&ctx.R_ptr_host[i], sizeof(float)));
+        checkCudaError(cudaMalloc(&ctx.diff_ptrs_host[i], 3 * sizeof(float)));
+        checkCudaError(cudaMalloc(&ctx.dL_ptrs_host[i], 3 * sizeof(float)));
+        checkCudaError(cudaMalloc(&ctx.d_I_host[i], sizeof(float)));
+        checkCudaError(cudaMalloc(&ctx.L_ptrs_host[i], 3 * sizeof(float)));
+        checkCudaError(cudaMalloc(&ctx.v_ptrs_new_host[i], 3 * sizeof(float)));
+
+        // Initialize d_I with 1.0f
         float one = 1.0f;
-        checkCudaError(cudaMemcpy(d_I_host[i], &one, sizeof(float), cudaMemcpyHostToDevice));
-        
-        // Copy individual matrix data to device
-        checkCudaError(cudaMemcpy(x_ptrs_host[i], x + i * 3, 3 * sizeof(float), cudaMemcpyHostToDevice));
-        checkCudaError(cudaMemcpy(x_ptrs_new_host[i], x_ptr_new + i * 3, 3 * sizeof(float), cudaMemcpyHostToDevice));
+        checkCudaError(cudaMemcpy(ctx.d_I_host[i], &one, sizeof(float), cudaMemcpyHostToDevice));
     }
+
+    // Copy host pointer arrays to device pointer arrays once
+    checkCudaError(cudaMemcpy(ctx.x_ptrs, ctx.x_ptrs_host, batchSize * sizeof(float*), cudaMemcpyHostToDevice));
+    checkCudaError(cudaMemcpy(ctx.x_ptrs_new, ctx.x_ptrs_new_host, batchSize * sizeof(float*), cudaMemcpyHostToDevice));
+    checkCudaError(cudaMemcpy(ctx.R_ptr, ctx.R_ptr_host, batchSize * sizeof(float*), cudaMemcpyHostToDevice));
+    checkCudaError(cudaMemcpy(ctx.diff_ptrs, ctx.diff_ptrs_host, batchSize * sizeof(float*), cudaMemcpyHostToDevice));
+    checkCudaError(cudaMemcpy(ctx.dL_ptrs, ctx.dL_ptrs_host, batchSize * sizeof(float*), cudaMemcpyHostToDevice));
+    checkCudaError(cudaMemcpy(ctx.d_I, ctx.d_I_host, batchSize * sizeof(float*), cudaMemcpyHostToDevice));
+    checkCudaError(cudaMemcpy(ctx.L_ptrs, ctx.L_ptrs_host, batchSize * sizeof(float*), cudaMemcpyHostToDevice));
+    checkCudaError(cudaMemcpy(ctx.v_ptrs_new, ctx.v_ptrs_new_host, batchSize * sizeof(float*), cudaMemcpyHostToDevice));
+}
+
+void freeRattleHardContext(RattleHardContext &ctx) {
+    // Free all device memory and host arrays
+    checkCudaError(cudaFree(ctx.x_ptr_new));
+    checkCudaError(cudaFree(ctx.v_ptr_new));
+    checkCudaError(cudaFree(ctx.d_I_flat));
+    checkCudaError(cudaFree(ctx.R_ptr_flat));
+    checkCudaError(cudaFree(ctx.L_ptrs_flat));
+    checkCudaError(cudaFree(ctx.diff_ptrs));
+    checkCudaError(cudaFree(ctx.dL_ptrs));
+    checkCudaError(cudaFree(ctx.d_I));
+    checkCudaError(cudaFree(ctx.L_ptrs));
+    checkCudaError(cudaFree(ctx.v_ptrs_new));
+    checkCudaError(cudaFree(ctx.dL_ptr));
+    checkCudaError(cudaFree(ctx.diff_ptr));
+    checkCudaError(cudaFree(ctx.v12_ptr));
+    checkCudaError(cudaFree(ctx.x_ptrs));
+    checkCudaError(cudaFree(ctx.x_ptrs_new));
+    checkCudaError(cudaFree(ctx.R_ptr));
+
+    for (int i = 0; i < ctx.batchSize; i++) {
+        checkCudaError(cudaFree(ctx.x_ptrs_host[i]));
+        checkCudaError(cudaFree(ctx.x_ptrs_new_host[i]));
+        checkCudaError(cudaFree(ctx.R_ptr_host[i]));
+        checkCudaError(cudaFree(ctx.diff_ptrs_host[i]));
+        checkCudaError(cudaFree(ctx.dL_ptrs_host[i]));
+        checkCudaError(cudaFree(ctx.d_I_host[i]));
+        checkCudaError(cudaFree(ctx.L_ptrs_host[i]));
+        checkCudaError(cudaFree(ctx.v_ptrs_new_host[i]));
+    }
+
+    delete[] ctx.x_ptrs_host;
+    delete[] ctx.x_ptrs_new_host;
+    delete[] ctx.R_ptr_host;
+    delete[] ctx.diff_ptrs_host;
+    delete[] ctx.dL_ptrs_host;
+    delete[] ctx.d_I_host;
+    delete[] ctx.L_ptrs_host;
+    delete[] ctx.v_ptrs_new_host;
+}
+
+
+void rattleHard(cublasHandle_t handle, cusolverDnHandle_t cusolver_handle, float *x_ptr, float *v_ptr, int batchSize, float h, RattleHardContext &ctx) {
+    float alpha = 4.0f;
+    float beta = 0.0f; 
+    float alpha2 = 2.0f;
+    float diffval = -1.0f;
+    float h_t = 4.0f / (h * h);
     
-    // Copy pointer arrays to device
-    checkCudaError(cudaMemcpy(x_ptrs, x_ptrs_host, batchSize * sizeof(float*), cudaMemcpyHostToDevice));
-    checkCudaError(cudaMemcpy(x_ptrs_new, x_ptrs_new_host, batchSize * sizeof(float*), cudaMemcpyHostToDevice));
-    checkCudaError(cudaMemcpy(R_ptr, R_ptr_host, batchSize * sizeof(float*), cudaMemcpyHostToDevice));
-    checkCudaError(cudaMemcpy(diff_ptrs, diff_ptrs_host, batchSize * sizeof(float*), cudaMemcpyHostToDevice));
-    checkCudaError(cudaMemcpy(dL_ptrs, dL_ptrs_host, batchSize * sizeof(float*), cudaMemcpyHostToDevice));
-    checkCudaError(cudaMemcpy(d_I, d_I_host, batchSize * sizeof(float*), cudaMemcpyHostToDevice));
-    checkCudaError(cudaMemcpy(L_ptrs, L_ptrs_host, batchSize * sizeof(float*), cudaMemcpyHostToDevice)); // FIX: Added for L_ptrs
-    checkCudaError(cudaMemcpy(v_ptrs_new, v_ptrs_new_host, batchSize * sizeof(float*), cudaMemcpyHostToDevice)); // FIX: Added for v_ptrs_new
-        
-    // Set up kernel execution parameters
     int blockSize = 256;
     int numBlocks = (batchSize + blockSize - 1) / blockSize;
-    float* diff_host = new float[batchSize * 3];
-    float *output_flat;
-    checkCudaError(cudaMalloc(&output_flat, batchSize * sizeof(float)));
-    // Main calculation loop
+
+    // 1) Add h*v to x_ptr_new
+    checkCublas(cublasSaxpy(handle, batchSize * 3, &h, v_ptr, 1, ctx.x_ptr_new, 1), "cublasSaxpy 1");
+
     for (int i = 0; i < 3; i++) {
-        // First matrix multiplication
-        // FIX: Correct matrix dimensions - assuming each x is a 1x3 row vector
+        // 2) Batched multiplication: R = 4 * x * x_new^T
         checkCublas(cublasSgemmBatched(handle,
-            CUBLAS_OP_N, CUBLAS_OP_T, // FIX: Transpose second matrix
+            CUBLAS_OP_N, CUBLAS_OP_T,
             1, 1, 3,
-            &alpha, // multiplying result by 4 for the sphere
-            (const float**)x_ptrs, 1,
-            (const float**)x_ptrs_new, 1, // FIX: Leading dimension should be 1 for row vector
+            &alpha,
+            (const float**)ctx.x_ptrs, 1,
+            (const float**)ctx.x_ptrs_new, 1,
             &beta,
-            R_ptr, 1,
+            ctx.R_ptr, 1,
             batchSize), "cublasSgemmBatched 1");
-        
         checkCudaError(cudaDeviceSynchronize());
-        // Convert batched to flattened
-        convertBatchedToFlattened<<<numBlocks, blockSize>>>(R_ptr, R_ptr_flat, batchSize, 1);
-        checkCudaError(cudaDeviceSynchronize());
-        
-        // Compute elementwise inverse
-        elementwiseInverse<<<numBlocks, blockSize>>>(R_ptr_flat, d_I_flat, batchSize);
-        checkCudaError(cudaDeviceSynchronize());
-        // printDeviceMatrix(d_I_flat, 1, 1);  // if your matrices are 1x1 as in your example
 
-        // Convert flattened to batched
-        convertFlattenedToBatched<<<numBlocks, blockSize>>>(d_I_flat, d_I, batchSize, 1);
+        // 3) Flatten R, compute inverse elementwise, convert back to batched
+        convertBatchedToFlattened<<<numBlocks, blockSize>>>(ctx.R_ptr, ctx.R_ptr_flat, batchSize, 1);
         checkCudaError(cudaDeviceSynchronize());
-        
-        G<<<numBlocks, blockSize>>>(x_ptrs_new, output_flat, batchSize);
-        elementwiseMul<<<numBlocks, blockSize>>>(d_I_flat, output_flat, dL_ptr, batchSize);
-        convertFlattenedToBatched<<<numBlocks, blockSize>>>(dL_ptr, dL_ptrs, batchSize, 1);
 
-        
+        elementwiseInverse<<<numBlocks, blockSize>>>(ctx.R_ptr_flat, ctx.d_I_flat, batchSize);
         checkCudaError(cudaDeviceSynchronize());
-        
-        // Third matrix multiplication
+
+        convertFlattenedToBatched<<<numBlocks, blockSize>>>(ctx.d_I_flat, ctx.d_I, batchSize, 1);
+        checkCudaError(cudaDeviceSynchronize());
+
+        // 4) Launch kernel G and multiply elementwise with d_I_flat -> dL_ptr, then convert to batched
+        G<<<numBlocks, blockSize>>>(ctx.x_ptrs_new, ctx.R_ptr_flat /*reuse*/, batchSize);
+        checkCudaError(cudaDeviceSynchronize());
+
+        elementwiseMul<<<numBlocks, blockSize>>>(ctx.d_I_flat, ctx.R_ptr_flat, ctx.dL_ptr, batchSize);
+        checkCudaError(cudaDeviceSynchronize());
+
+        convertFlattenedToBatched<<<numBlocks, blockSize>>>(ctx.dL_ptr, ctx.dL_ptrs, batchSize, 1);
+        checkCudaError(cudaDeviceSynchronize());
+
+        // 5) Third matrix multiplication: diff = 2 * x * dL_ptr
         checkCublas(cublasSgemmBatched(handle,
             CUBLAS_OP_N, CUBLAS_OP_N,
             3, 1, 1,
             &alpha2,
-            (const float**)x_ptrs, 3,
-            (const float**)dL_ptrs, 1,
+            (const float**)ctx.x_ptrs, 3,
+            (const float**)ctx.dL_ptrs, 1,
             &beta,
-            diff_ptrs, 3,
-            batchSize), "cublasSgemmBatched 3"); // diff = 2 x dL_ptrs
-
-
-        checkCudaError(cudaDeviceSynchronize());
-        
-        // Convert batched to flattened for diff
-        convertBatchedToFlattened<<<numBlocks, blockSize>>>(diff_ptrs, diff_ptr, batchSize, 3);
+            ctx.diff_ptrs, 3,
+            batchSize), "cublasSgemmBatched 3");
         checkCudaError(cudaDeviceSynchronize());
 
-        
-        // checkCudaError(cudaMemcpy(diff_host, diff_ptr, batchSize * 3 * sizeof(float), cudaMemcpyDeviceToHost));
+        // 6) Flatten diff, then apply diffval offset to x_ptr_new
+        convertBatchedToFlattened<<<numBlocks, blockSize>>>(ctx.diff_ptrs, ctx.diff_ptr, batchSize, 3);
+        checkCudaError(cudaDeviceSynchronize());
 
-        // // Print diff_host contents
-        // std::cout << "diff_ptr after iteration " << i << ":\n";
-        // for (int b = 0; b < batchSize; b++) {
-        //     std::cout << "Batch " << b << ": ";
-        //     for (int j = 0; j < 3; j++) {
-        //         std::cout << diff_host[b * 3 + j] << " ";
-        //     }
-        //     std::cout << "\n";
-        // }
-        // Apply diff to x_ptr_new
-        checkCublas(cublasSaxpy(handle, batchSize * 3, &diffval, diff_ptr, 1, x_ptr_new, 1), "cublasSaxpy 2"); //xnew​=xnew​- diff_ptr
-        convertFlattenedToBatched<<<numBlocks, blockSize>>>(x_ptr_new, x_ptrs_new, batchSize, 1);
+        checkCublas(cublasSaxpy(handle, batchSize * 3, &diffval, ctx.diff_ptr, 1, ctx.x_ptr_new, 1), "cublasSaxpy 2");
 
+        convertFlattenedToBatched<<<numBlocks, blockSize>>>(ctx.x_ptr_new, ctx.x_ptrs_new, batchSize, 1);
+        checkCudaError(cudaDeviceSynchronize());
     }
-    
-    // Copy x_new to v_new
-    checkCudaError(cudaMemcpy(v_ptr_new, x_ptr_new, 3 * batchSize * sizeof(float), cudaMemcpyDeviceToDevice));
-    
-    // Subtract original x from v_new
-    checkCublas(cublasSaxpy(handle, batchSize * 3, &diffval, x_ptr, 1, v_ptr_new, 1), "cublasSaxpy 3"); // vptr_new = xptr_new - x_ptr . still needs to be divided by h
-    
-    // float* v_host = new float[batchSize * 3];
-    // cudaMemcpy(v_host, v_ptr_new, batchSize * 3 * sizeof(float), cudaMemcpyDeviceToHost);
 
+    // 7) Copy x_ptr_new to v_ptr_new, then subtract original x_ptr (v_ptr_new = x_ptr_new - x_ptr)
+    checkCudaError(cudaMemcpy(ctx.v_ptr_new, ctx.x_ptr_new, 3 * batchSize * sizeof(float), cudaMemcpyDeviceToDevice));
+    checkCublas(cublasSaxpy(handle, batchSize * 3, &diffval, x_ptr, 1, ctx.v_ptr_new, 1), "cublasSaxpy 3");
 
-    // Convert flattened to batched for updated x
-    convertFlattenedToBatched<<<numBlocks, blockSize>>>(x_ptr_new, x_ptrs_new, batchSize, 3);
+    convertFlattenedToBatched<<<numBlocks, blockSize>>>(ctx.x_ptr_new, ctx.x_ptrs_new, batchSize, 3);
     checkCudaError(cudaDeviceSynchronize());
-    
-    // Fourth matrix multiplication
-    // FIX: Correct dot product dimensions
+
+    // 8) Batched multiplication updating R_ptr (P)
     checkCublas(cublasSgemmBatched(handle,
-        CUBLAS_OP_N, CUBLAS_OP_T, // FIX: Transpose second matrix
+        CUBLAS_OP_N, CUBLAS_OP_T,
         1, 1, 3,
         &alpha,
-        (const float**)x_ptrs_new, 1,
-        (const float**)x_ptrs_new, 1,
+        (const float**)ctx.x_ptrs_new, 1,
+        (const float**)ctx.x_ptrs_new, 1,
         &beta,
-        R_ptr, 1,
-        batchSize), "cublasSgemmBatched 4"); // updating R_ptr, this is equivalent to P in the original
-    
+        ctx.R_ptr, 1,
+        batchSize), "cublasSgemmBatched 4");
     checkCudaError(cudaDeviceSynchronize());
-    
-    // Convert flattened to batched for v_new
-    convertFlattenedToBatched<<<numBlocks, blockSize>>>(v_ptr_new, v_ptrs_new, batchSize, 3);
+
+    // 9) Convert v_ptr_new to batched pointers
+    convertFlattenedToBatched<<<numBlocks, blockSize>>>(ctx.v_ptr_new, ctx.v_ptrs_new, batchSize, 3);
     checkCudaError(cudaDeviceSynchronize());
-    
-    // Fifth matrix multiplication
+
+    // 10) Batched multiplication: dL_ptrs = h_t * x_ptr_new * v_ptr_new
     checkCublas(cublasSgemmBatched(handle,
         CUBLAS_OP_N, CUBLAS_OP_N,
         3, 1, 1,
         &h_t,
-        (const float**)x_ptrs_new, 3,
-        (const float**)v_ptrs_new, 1,
+        (const float**)ctx.x_ptrs_new, 3,
+        (const float**)ctx.v_ptrs_new, 1,
         &beta,
-        dL_ptrs, 3,
-        batchSize), "cublasSgemmBatched 5"); // dl_ptrs = 4(x @ 2v/h) - equal to t in the original implementation
-        // h_t is 4/h^2 because v still needed to be divided by h, 
-    
+        ctx.dL_ptrs, 3,
+        batchSize), "cublasSgemmBatched 5");
     checkCudaError(cudaDeviceSynchronize());
-    
-    // Convert batched to flattened
-    convertBatchedToFlattened<<<numBlocks, blockSize>>>(R_ptr, R_ptr_flat, batchSize, 1);
-    convertBatchedToFlattened<<<numBlocks, blockSize>>>(dL_ptrs, dL_ptr, batchSize, 3);
+
+    // 11) Flatten R_ptr and dL_ptrs for elementwise division
+    convertBatchedToFlattened<<<numBlocks, blockSize>>>(ctx.R_ptr, ctx.R_ptr_flat, batchSize, 1);
+    convertBatchedToFlattened<<<numBlocks, blockSize>>>(ctx.dL_ptrs, ctx.dL_ptr, batchSize, 3);
     checkCudaError(cudaDeviceSynchronize());
-    
-    // Element-wise division
-    elementwiseDiv<<<numBlocks, blockSize>>>(R_ptr_flat, dL_ptr, L_ptrs_flat, batchSize * 3); // L = L_ptrs/R = T/P
+
+    // 12) L_ptrs_flat = dL_ptr / R_ptr_flat (elementwise division)
+    elementwiseDiv<<<numBlocks, blockSize>>>(ctx.R_ptr_flat, ctx.dL_ptr, ctx.L_ptrs_flat, batchSize * 3);
     checkCudaError(cudaDeviceSynchronize());
-    
-    // Convert flattened to batched
-    convertFlattenedToBatched<<<numBlocks, blockSize>>>(L_ptrs_flat, L_ptrs, batchSize, 3);
+
+    // 13) Convert flattened L_ptrs_flat back to batched pointers
+    convertFlattenedToBatched<<<numBlocks, blockSize>>>(ctx.L_ptrs_flat, ctx.L_ptrs, batchSize, 3);
     checkCudaError(cudaDeviceSynchronize());
-    
+
     float h2 = h;
-    float h3 = 1.0f/h;
-    
-    // Final matrix multiplication
+    float h3 = 1.0f / h;
+
+    // 14) Final batched multiplication updating v_ptrs_new
     checkCublas(cublasSgemmBatched(handle,
         CUBLAS_OP_N, CUBLAS_OP_N,
         3, 1, 1,
         &h2,
-        (const float**)x_ptrs_new, 3,
-        (const float**)L_ptrs, 1,
+        (const float**)ctx.x_ptrs_new, 3,
+        (const float**)ctx.L_ptrs, 1,
         &h3,
-        v_ptrs_new, 3,
-        batchSize), "cublasSgemmBatched 6"); // v_ptrs_new = (h) * x_ptrs_new * dL_ptrs + 1/h v_ptrs_new = v + h/2 J @ L 
-    
+        ctx.v_ptrs_new, 3,
+        batchSize), "cublasSgemmBatched 6");
     checkCudaError(cudaDeviceSynchronize());
-    cudaMemcpy(x_ptr, x_ptr_new, batchSize * 3 * sizeof(float), cudaMemcpyDeviceToDevice);
-    cudaMemcpy(v_ptr, v_ptr_new, batchSize * 3 * sizeof(float), cudaMemcpyDeviceToDevice);
 
-    // Free all allocated memory
-    // checkCudaError(cudaFree(x_ptr));
-    // checkCudaError(cudaFree(v_ptr));
-    checkCudaError(cudaFree(x_ptr_new));
-    checkCudaError(cudaFree(v_ptr_new));
-    checkCudaError(cudaFree(d_I_flat));
-    checkCudaError(cudaFree(R_ptr_flat));
-    checkCudaError(cudaFree(L_ptrs_flat));  // FIX: Free allocated memory
-    checkCudaError(cudaFree(diff_ptrs));
-    checkCudaError(cudaFree(dL_ptrs));
-    checkCudaError(cudaFree(d_I));
-    checkCudaError(cudaFree(L_ptrs));       // FIX: Free allocated memory
-    checkCudaError(cudaFree(v_ptrs_new));   // FIX: Free allocated memory
-    checkCudaError(cudaFree(dL_ptr));
-    checkCudaError(cudaFree(diff_ptr));
-    checkCudaError(cudaFree(v12_ptr));
-    checkCudaError(cudaFree(x_ptrs));
-    checkCudaError(cudaFree(x_ptrs_new));
-    checkCudaError(cudaFree(R_ptr));
-    
-    // Free host temporary arrays
-    for (int i = 0; i < batchSize; i++) {
-        checkCudaError(cudaFree(x_ptrs_host[i]));
-        checkCudaError(cudaFree(x_ptrs_new_host[i]));
-        checkCudaError(cudaFree(R_ptr_host[i]));
-        checkCudaError(cudaFree(diff_ptrs_host[i]));
-        checkCudaError(cudaFree(dL_ptrs_host[i]));
-        checkCudaError(cudaFree(d_I_host[i]));
-        checkCudaError(cudaFree(L_ptrs_host[i]));     // FIX: Free allocated memory
-        checkCudaError(cudaFree(v_ptrs_new_host[i])); // FIX: Free allocated memory
-    }
-    
-    delete[] x_ptrs_host;
-    delete[] x_ptrs_new_host;
-    delete[] R_ptr_host;
-    delete[] diff_ptrs_host;
-    delete[] dL_ptrs_host;
-    delete[] d_I_host;
-    delete[] L_ptrs_host;     // FIX: Delete allocated memory
-    delete[] v_ptrs_new_host; // FIX: Delete allocated memory
+    // 15) Copy results back to original x and v pointers
+    checkCudaError(cudaMemcpy(x_ptr, ctx.x_ptr_new, batchSize * 3 * sizeof(float), cudaMemcpyDeviceToDevice));
+    checkCudaError(cudaMemcpy(v_ptr, ctx.v_ptr_new, batchSize * 3 * sizeof(float), cudaMemcpyDeviceToDevice));
 }
 
 
-void rattle_hard_launcher(torch::Tensor x, torch::Tensor v, float h) {
+void rattle_hard_launcher(torch::Tensor x, torch::Tensor v, float h, int n) {
     TORCH_CHECK(x.is_cuda(), "x must be a CUDA tensor");
     TORCH_CHECK(v.is_cuda(), "v must be a CUDA tensor");
     TORCH_CHECK(x.dtype() == torch::kFloat32, "x must be float32");
     TORCH_CHECK(v.dtype() == torch::kFloat32, "v must be float32");
+    TORCH_CHECK(x.size(0) == v.size(0), "x and v must have the same batch size");
 
     float* d_x = x.data_ptr<float>();
     float* d_v = v.data_ptr<float>();
     int batchSize = x.size(0);
 
+    // Create cuBLAS and cuSolver handles
     cublasHandle_t cublasHandle;
     cublasCreate(&cublasHandle);
     cusolverDnHandle_t cusolverHandle;
     cusolverDnCreate(&cusolverHandle);
 
-    // Pass device pointers directly to rattleHard
-    rattleHard(cublasHandle, cusolverHandle, d_x, d_v, batchSize, h);
+    // Allocate context once outside the loop
+    RattleHardContext ctx;
+    allocateRattleHardContext(ctx, batchSize);
 
+    // Run rattleHard n times
+    for (int i = 0; i < n; ++i) {
+        rattleHard(cublasHandle, cusolverHandle, d_x, d_v, batchSize, h, ctx);
+    }
+
+    // Free context memory
+    freeRattleHardContext(ctx);
+
+    // Destroy cuBLAS and cuSolver handles
     cublasDestroy(cublasHandle);
     cusolverDnDestroy(cusolverHandle);
-}
-
-int main() {
-    int maxThreadsPerBlock;
-    cudaDeviceGetAttribute(&maxThreadsPerBlock, cudaDevAttrMaxThreadsPerBlock, 0);
-    std::cout << "maxThreadsPerBlock: " << maxThreadsPerBlock << std::endl;
-    
-    // Initialize cuBLAS and cuSolver handles
-    cublasHandle_t cublasHandle;
-    cusolverDnHandle_t cusolverHandle;
-    
-    // Create handles
-    cublasCreate(&cublasHandle);
-    cusolverDnCreate(&cusolverHandle);
-    
-    // Define batch size and the value for h
-    int batchSize = 2; // Example batch size
-    float h = 0.01f;   // Example step size
-    
-    // Example x and v data (batchSize x 3, 3D matrix per batch)
-    float h_x[batchSize * 3] = {1.0f, 2.0f, 3.0f,  // x[0]
-                                4.0f, 5.0f, 6.0f}; // x[1]
-    float h_v[batchSize * 3] = {0.5f, 0.5f, 0.5f,  // v[0]
-                                0.1f, 0.1f, 0.1f}; // v[1]
-    
-    // Allocate device memory for x and v
-    float *d_x, *d_v;
-    cudaMalloc(&d_x, batchSize * 3 * sizeof(float));
-    cudaMalloc(&d_v, batchSize * 3 * sizeof(float));
-    
-    // Copy data from host to device
-    cudaMemcpy(d_x, h_x, batchSize * 3 * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_v, h_v, batchSize * 3 * sizeof(float), cudaMemcpyHostToDevice);
-    
-    // Call the rattleHard function
-    rattleHard(cublasHandle, cusolverHandle, d_x, d_v, batchSize, h);
-    
-    // Copy the result back to host
-    cudaMemcpy(h_x, d_x, batchSize * 3 * sizeof(float), cudaMemcpyDeviceToHost);
-    
-
-    // Cleanup
-    cudaFree(d_x);
-    cudaFree(d_v);
-    cublasDestroy(cublasHandle);
-    cusolverDnDestroy(cusolverHandle);
-    
-    return 0;
 }

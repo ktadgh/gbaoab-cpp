@@ -17,8 +17,7 @@ x, v =  random_point_on_sphere(batch_size,3)
 
 h = 0.000001
 t1 = time.time()
-for _ in range(1000):
-    rattle_hard_cuda.rattle_hard(x, v, h)
+rattle_hard_cuda.rattle_hard(x, v, h, 1000)
 t2 = time.time()
 print(f'time per iteration = {t2-t1} ms')
 

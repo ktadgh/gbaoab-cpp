@@ -1,7 +1,7 @@
 #include <torch/extension.h>
 
 // Declare your function (assuming you refactor rattleHard to work with torch::Tensor)
-void rattle_hard_launcher(torch::Tensor x, torch::Tensor v, float h);
+void rattle_hard_launcher(torch::Tensor x, torch::Tensor v, float h, int  n);
 
 // Binding
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
